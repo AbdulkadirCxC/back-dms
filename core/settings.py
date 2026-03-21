@@ -2,6 +2,7 @@
 Django settings for Dental Management System project.
 """
 
+from datetime import timedelta
 from pathlib import Path
 
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -100,3 +101,9 @@ REST_FRAMEWORK = {
 
 # CORS - Allow all in development; restrict in production
 CORS_ALLOW_ALL_ORIGINS = True
+
+# JWT Token expiration
+SIMPLE_JWT = {
+    'ACCESS_TOKEN_LIFETIME': timedelta(hours=24),   # Access token valid for 24 hours
+    'REFRESH_TOKEN_LIFETIME': timedelta(days=30),   # Refresh token valid for 30 days
+}
