@@ -1,5 +1,6 @@
 from django.contrib.auth.models import User
 from django.core.exceptions import ObjectDoesNotExist
+from django.db.models import Sum
 from django.utils import timezone
 from rest_framework import serializers
 from .models import Patient, Dentist, Appointment, Treatment, PatientTreatment, Invoice, Payment
@@ -79,7 +80,10 @@ class AppointmentSerializer(serializers.ModelSerializer):
         """Accept case-insensitive status."""
         if value:
             normalized = value.lower()
-            valid = ('scheduled', 'confirmed', 'completed', 'cancelled', 'no_show')
+            valid = (
+                'scheduled', 'confirmed', 'completed', 'cancelled',
+                'missed', 'no_show',
+            )
             if normalized not in valid:
                 raise serializers.ValidationError(f'Must be one of: {valid}')
             return normalized
@@ -100,6 +104,33 @@ class AppointmentSerializer(serializers.ModelSerializer):
         elif not self.instance:
             raise serializers.ValidationError({'date': 'Date and time are required when creating.'})
         return attrs
+
+
+_STATUS_ALIASES = {
+    'complated': 'completed',
+    'cancaled': 'cancelled',
+    'canceled': 'cancelled',
+}
+
+
+class AppointmentStatusUpdateSerializer(serializers.ModelSerializer):
+    """PATCH /appointments/{id}/status/ — only completed, cancelled, or missed."""
+
+    class Meta:
+        model = Appointment
+        fields = ('status',)
+
+    def validate_status(self, value):
+        if value is None or (isinstance(value, str) and not value.strip()):
+            raise serializers.ValidationError('status is required.')
+        raw = str(value).strip().lower().replace(' ', '_')
+        raw = _STATUS_ALIASES.get(raw, raw)
+        allowed = {'completed', 'cancelled', 'missed'}
+        if raw not in allowed:
+            raise serializers.ValidationError(
+                'Status must be one of: completed, cancelled, missed.'
+            )
+        return raw
 
 
 class TreatmentSerializer(serializers.ModelSerializer):
@@ -133,6 +164,60 @@ class PatientTreatmentSerializer(serializers.ModelSerializer):
             return None
 
 
+class TreatmentItemSerializer(serializers.Serializer):
+    """Single treatment row: treatment (+ treatment_id alias) + optional cost_override."""
+
+    treatment = serializers.PrimaryKeyRelatedField(queryset=Treatment.objects.all())
+    cost_override = serializers.DecimalField(
+        max_digits=10, decimal_places=2, required=False, allow_null=True
+    )
+
+    def to_internal_value(self, data):
+        data = dict(data)
+        if 'treatment_id' in data and 'treatment' not in data:
+            data['treatment'] = data['treatment_id']
+            del data['treatment_id']
+        return super().to_internal_value(data)
+
+
+class PatientTreatmentBatchSerializer(serializers.Serializer):
+    """Bulk add: patient, dentist, date + list of treatments (Add patient treatments form)."""
+
+    patient = serializers.PrimaryKeyRelatedField(queryset=Patient.objects.all())
+    dentist = serializers.PrimaryKeyRelatedField(queryset=Dentist.objects.all())
+    date = serializers.DateField(
+        input_formats=['%Y-%m-%d', '%d/%m/%Y', '%m/%d/%Y', '%d-%m-%Y'],
+    )
+    treatments = serializers.ListField(
+        child=TreatmentItemSerializer(),
+        min_length=1,
+    )
+
+    def to_internal_value(self, data):
+        data = dict(data)
+        if 'patient_id' in data and 'patient' not in data:
+            data['patient'] = data['patient_id']
+            del data['patient_id']
+        if 'dentist_id' in data and 'dentist' not in data:
+            data['dentist'] = data['dentist_id']
+            del data['dentist_id']
+        return super().to_internal_value(data)
+
+    def create(self, validated_data):
+        treatments_data = validated_data.pop('treatments')
+        created = []
+        for item in treatments_data:
+            pt = PatientTreatment.objects.create(
+                patient=validated_data['patient'],
+                dentist=validated_data['dentist'],
+                date=validated_data['date'],
+                treatment=item['treatment'],
+                cost_override=item.get('cost_override'),
+            )
+            created.append(pt)
+        return created
+
+
 class PaymentSerializer(serializers.ModelSerializer):
     class Meta:
         model = Payment
@@ -157,10 +242,21 @@ class PaymentSerializer(serializers.ModelSerializer):
 class InvoiceSerializer(serializers.ModelSerializer):
     patient_name = serializers.CharField(source='patient.full_name', read_only=True)
     payments = PaymentSerializer(many=True, read_only=True)
+    paid_amount = serializers.SerializerMethodField()
+    balance = serializers.SerializerMethodField()
 
     class Meta:
         model = Invoice
         fields = '__all__'
+
+    def get_paid_amount(self, obj):
+        total = obj.payments.aggregate(s=Sum('amount'))['s']
+        return float(total) if total is not None else 0.0
+
+    def get_balance(self, obj):
+        total_amount = float(obj.total_amount)
+        paid = self.get_paid_amount(obj)
+        return round(total_amount - paid, 2)
 
     def validate_status(self, value):
         """Accept case-insensitive status."""
