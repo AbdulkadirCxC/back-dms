@@ -1,5 +1,13 @@
 from django.contrib import admin
-from .models import Patient, Dentist, Appointment, Treatment, PatientTreatment, Invoice, Payment
+from .models import Patient, Dentist, Appointment, Treatment, PatientTreatment, Invoice, Payment, AuditLog
+
+
+@admin.register(AuditLog)
+class AuditLogAdmin(admin.ModelAdmin):
+    list_display = ['created_at', 'user', 'action', 'method', 'resource', 'path']
+    list_filter = ['action', 'method', 'resource']
+    search_fields = ['path', 'resource', 'object_repr']
+    readonly_fields = ['user', 'action', 'path', 'method', 'resource', 'object_id', 'object_repr', 'ip_address', 'user_agent', 'extra', 'created_at']
 
 
 @admin.register(Patient)

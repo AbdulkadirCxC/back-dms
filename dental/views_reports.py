@@ -8,10 +8,10 @@ from django.contrib.auth import get_user_model
 from django.db.models import Sum, Count
 from django.utils import timezone
 from rest_framework.decorators import api_view, permission_classes
-from rest_framework.permissions import IsAuthenticated
+from rest_framework.permissions import IsAuthenticated, IsAdminUser
 from rest_framework.response import Response
 
-from .models import PatientTreatment, Appointment, Invoice, Payment, Dentist, Patient
+from .models import PatientTreatment, Appointment, Invoice, Payment, Dentist, Patient, AuditLog
 
 
 @api_view(['GET'])
@@ -213,6 +213,172 @@ def most_common_treatments_report(request):
 
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
+def customer_statement(request):
+    """
+    Customer Statement API: ledger-style transactions with running balance.
+    Query params: patient (required), start_date, end_date (YYYY-MM-DD)
+    Returns: patient info, transactions (DATE, TYPE, INVOICE, DESCRIPTION, PAYMENT, AMOUNT, BALANCE)
+    """
+    patient_id = request.query_params.get('patient')
+    if not patient_id:
+        return Response(
+            {'error': 'patient query param required (patient id)'},
+            status=400,
+        )
+    try:
+        patient = Patient.objects.get(pk=patient_id)
+    except (Patient.DoesNotExist, ValueError):
+        return Response(
+            {'error': 'Patient not found'},
+            status=404,
+        )
+
+    start_date = request.query_params.get('start_date')
+    end_date = request.query_params.get('end_date')
+    if start_date:
+        try:
+            start_date = datetime.strptime(start_date, '%Y-%m-%d').date()
+        except ValueError:
+            return Response(
+                {'error': 'start_date must be YYYY-MM-DD'},
+                status=400,
+            )
+    if end_date:
+        try:
+            end_date = datetime.strptime(end_date, '%Y-%m-%d').date()
+        except ValueError:
+            return Response(
+                {'error': 'end_date must be YYYY-MM-DD'},
+                status=400,
+            )
+
+    # Opening balance (charges - payments before start_date)
+    opening_balance = Decimal('0')
+    if start_date:
+        before_invoices = Invoice.objects.filter(
+            patient=patient
+        ).filter(created_at__date__lt=start_date)
+        before_payments = Payment.objects.filter(
+            invoice__patient=patient
+        ).filter(payment_date__lt=start_date)
+        total_before_charges = before_invoices.aggregate(s=Sum('total_amount'))['s'] or Decimal('0')
+        total_before_payments = before_payments.aggregate(s=Sum('amount'))['s'] or Decimal('0')
+        opening_balance = total_before_charges - total_before_payments
+
+    # Build rows: (date, type, invoice_id, description, payment, amount)
+    rows = []
+
+    invoices = Invoice.objects.filter(patient=patient).select_related(
+        'patient_treatment__treatment', 'patient_treatment__dentist'
+    )
+    if start_date:
+        invoices = invoices.filter(created_at__date__gte=start_date)
+    if end_date:
+        invoices = invoices.filter(created_at__date__lte=end_date)
+
+    for inv in invoices:
+        desc = (
+            inv.patient_treatment.treatment.name
+            if inv.patient_treatment_id and inv.patient_treatment.treatment_id
+            else f'Invoice #{inv.id}'
+        )
+        date_val = inv.created_at.date() if inv.created_at else None
+        rows.append({
+            'date': date_val.isoformat() if date_val else None,
+            'type': 'charge',
+            'invoice': inv.id,
+            'description': desc,
+            'payment': 0,
+            'amount': float(inv.total_amount),
+        })
+
+    payments = Payment.objects.filter(invoice__patient=patient).select_related('invoice')
+    if start_date:
+        payments = payments.filter(payment_date__gte=start_date)
+    if end_date:
+        payments = payments.filter(payment_date__lte=end_date)
+
+    for p in payments:
+        method_display = dict(Payment.METHOD_CHOICES).get(p.method, p.method)
+        rows.append({
+            'date': p.payment_date.isoformat(),
+            'type': 'payment',
+            'invoice': p.invoice_id,
+            'description': f'Payment Received ({method_display})',
+            'payment': float(p.amount),
+            'amount': 0,
+        })
+
+    rows.sort(key=lambda r: (r['date'] or '0000-00-00', 0 if r['type'] == 'charge' else 1))
+
+    total_charges = sum(r['amount'] for r in rows)
+    total_payments = sum(r['payment'] for r in rows)
+
+    def _format_mdy(d):
+        """Format date as M/D/YY (e.g. 1/15/12)."""
+        if isinstance(d, str):
+            try:
+                d = datetime.strptime(d, '%Y-%m-%d').date()
+            except (ValueError, TypeError):
+                return d
+        if hasattr(d, 'month'):
+            return f'{d.month}/{d.day}/{str(d.year)[2:]}'
+        return str(d)
+
+    # Build ledger with running balance: Previous Balance + AMOUNT - PAYMENT
+    transactions = []
+    balance = float(opening_balance)
+
+    # Balance Forward row
+    period_start = start_date
+    if not period_start and rows:
+        try:
+            period_start = datetime.strptime(rows[0]['date'], '%Y-%m-%d').date()
+        except (ValueError, TypeError):
+            period_start = timezone.now().date()
+    if not period_start:
+        period_start = timezone.now().date()
+    transactions.append({
+        'date': _format_mdy(period_start),
+        'type': '',
+        'invoice': None,
+        'description': 'Balance Forward',
+        'payment': 0,
+        'amount': 0,
+        'balance': round(balance, 2),
+    })
+
+    for r in rows:
+        balance = balance + r['amount'] - r['payment']
+        transactions.append({
+            'date': _format_mdy(r['date']) if r['date'] else None,
+            'type': r['type'].capitalize(),
+            'invoice': r['invoice'],
+            'description': r['description'],
+            'payment': r['payment'] if r['payment'] else 0,
+            'amount': r['amount'] if r['amount'] else 0,
+            'balance': round(balance, 2),
+        })
+
+    return Response({
+        'patient': {
+            'id': patient.id,
+            'full_name': patient.full_name,
+            'phone': patient.phone,
+            'date_of_birth': patient.date_of_birth.isoformat(),
+        },
+        'statement_date': timezone.now().date().isoformat(),
+        'transactions': transactions,
+        'summary': {
+            'total_charges': round(total_charges, 2),
+            'total_payments': round(total_payments, 2),
+            'balance_due': round(balance, 2),
+        },
+    })
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
 def payment_method_report(request):
     """
     Payment Method Report: method, transactions, total_amount
@@ -240,4 +406,60 @@ def payment_method_report(request):
         if not any(r['method'] == choice_label for r in result):
             result.append({'method': choice_label, 'transactions': 0, 'total_amount': 0})
     result.sort(key=lambda x: -x['transactions'])
+    return Response(result)
+
+
+@api_view(['GET'])
+@permission_classes([IsAdminUser])
+def activity_logs(request):
+    """
+    Activity/Audit logs report.
+    Query params: user, action, resource, start_date, end_date, limit
+    """
+    qs = AuditLog.objects.select_related('user').all()
+
+    if 'user' in request.query_params:
+        qs = qs.filter(user_id=request.query_params['user'])
+    if 'action' in request.query_params:
+        qs = qs.filter(action=request.query_params['action'])
+    if 'resource' in request.query_params:
+        qs = qs.filter(resource__icontains=request.query_params['resource'])
+    if 'start_date' in request.query_params:
+        try:
+            start = datetime.strptime(request.query_params['start_date'], '%Y-%m-%d')
+            qs = qs.filter(created_at__date__gte=start.date())
+        except ValueError:
+            pass
+    if 'end_date' in request.query_params:
+        try:
+            end = datetime.strptime(request.query_params['end_date'], '%Y-%m-%d')
+            qs = qs.filter(created_at__date__lte=end.date())
+        except ValueError:
+            pass
+
+    limit = 100
+    if 'limit' in request.query_params:
+        try:
+            limit = min(500, max(1, int(request.query_params['limit'])))
+        except ValueError:
+            pass
+
+    qs = qs.order_by('-created_at')[:limit]
+
+    result = [
+        {
+            'id': log.id,
+            'user': log.user.username if log.user_id else None,
+            'user_id': log.user_id,
+            'action': log.action,
+            'path': log.path,
+            'method': log.method,
+            'resource': log.resource or None,
+            'object_id': log.object_id or None,
+            'object_repr': log.object_repr or None,
+            'ip_address': str(log.ip_address) if log.ip_address else None,
+            'created_at': log.created_at.isoformat() if log.created_at else None,
+        }
+        for log in qs
+    ]
     return Response(result)

@@ -1,7 +1,38 @@
+from django.contrib.auth import get_user_model
 from rest_framework import generics, permissions, status
 from rest_framework.response import Response
+from rest_framework_simplejwt.views import TokenObtainPairView
 
+from .audit import get_client_ip
+from .models import AuditLog
 from .serializers import UserRegisterSerializer
+
+User = get_user_model()
+
+
+class TokenObtainPairWithLogView(TokenObtainPairView):
+    """JWT token + login audit log."""
+
+    def post(self, request, *args, **kwargs):
+        response = super().post(request, *args, **kwargs)
+        if response.status_code == 200:
+            try:
+                username = request.data.get('username', '')
+                user = User.objects.filter(username__iexact=username).first()
+                ip = get_client_ip(request)
+                AuditLog.objects.create(
+                    user=user,
+                    action='login',
+                    path=request.path,
+                    method=request.method,
+                    resource='auth',
+                    object_repr=f'Login: {username}',
+                    ip_address=ip,
+                    user_agent=request.META.get('HTTP_USER_AGENT', '')[:500],
+                )
+            except Exception:
+                pass
+        return response
 
 
 class RegisterView(generics.CreateAPIView):

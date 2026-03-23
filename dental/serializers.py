@@ -1,4 +1,4 @@
-from django.contrib.auth.models import User
+from django.contrib.auth.models import User, Group, Permission
 from django.core.exceptions import ObjectDoesNotExist
 from django.db.models import Sum
 from django.utils import timezone
@@ -31,6 +31,33 @@ class UserRegisterSerializer(serializers.ModelSerializer):
             email=validated_data.get('email') or '',
             password=validated_data['password'],
         )
+
+
+class UserListSerializer(serializers.ModelSerializer):
+    """User list/retrieve - no password."""
+    roles = serializers.SerializerMethodField()
+
+    class Meta:
+        model = User
+        fields = ['id', 'username', 'email', 'is_staff', 'is_superuser', 'is_active', 'date_joined', 'roles']
+
+    def get_roles(self, obj):
+        return [{'id': g.id, 'name': g.name} for g in obj.groups.all()]
+
+
+class UserUpdateSerializer(serializers.ModelSerializer):
+    """User update: username, email, is_staff, is_superuser, is_active."""
+
+    class Meta:
+        model = User
+        fields = ['username', 'email', 'is_staff', 'is_superuser', 'is_active']
+
+    def validate_username(self, value):
+        if self.instance and User.objects.filter(username__iexact=value).exclude(pk=self.instance.pk).exists():
+            raise serializers.ValidationError('A user with this username already exists.')
+        if not self.instance and User.objects.filter(username__iexact=value).exists():
+            raise serializers.ValidationError('A user with this username already exists.')
+        return value
 
 
 class PatientSerializer(serializers.ModelSerializer):
@@ -267,3 +294,56 @@ class InvoiceSerializer(serializers.ModelSerializer):
                 raise serializers.ValidationError(f'Must be one of: {valid}')
             return normalized
         return value
+
+
+# --- Roles & Permissions ---
+
+class PermissionSerializer(serializers.ModelSerializer):
+    """Read-only serializer for listing available permissions."""
+    app_label = serializers.CharField(source='content_type.app_label', read_only=True)
+    model_name = serializers.CharField(source='content_type.model', read_only=True)
+
+    class Meta:
+        model = Permission
+        fields = ['id', 'codename', 'name', 'app_label', 'model_name']
+
+
+class RoleSerializer(serializers.ModelSerializer):
+    """Role (Group) serializer for read operations."""
+    permissions = PermissionSerializer(many=True, read_only=True)
+    permissions_count = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Group
+        fields = ['id', 'name', 'permissions', 'permissions_count']
+
+    def get_permissions_count(self, obj):
+        return obj.permissions.count()
+
+
+class RoleCreateUpdateSerializer(serializers.ModelSerializer):
+    """Role create/update with permission IDs."""
+    permissions = serializers.PrimaryKeyRelatedField(
+        many=True,
+        queryset=Permission.objects.all(),
+        required=False,
+        allow_empty=True,
+    )
+
+    class Meta:
+        model = Group
+        fields = ['name', 'permissions']
+
+    def create(self, validated_data):
+        permissions = validated_data.pop('permissions', [])
+        group = Group.objects.create(**validated_data)
+        group.permissions.set(permissions)
+        return group
+
+    def update(self, instance, validated_data):
+        permissions = validated_data.pop('permissions', None)
+        instance.name = validated_data.get('name', instance.name)
+        instance.save()
+        if permissions is not None:
+            instance.permissions.set(permissions)
+        return instance
