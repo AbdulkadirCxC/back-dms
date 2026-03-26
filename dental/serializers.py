@@ -3,7 +3,7 @@ from django.core.exceptions import ObjectDoesNotExist
 from django.db.models import Sum
 from django.utils import timezone
 from rest_framework import serializers
-from .models import Patient, Dentist, Appointment, Treatment, PatientTreatment, Invoice, Payment
+from .models import Patient, Dentist, Appointment, Treatment, PatientTreatment, Invoice, Payment, PatientRecall, RecallNotification
 
 
 class UserRegisterSerializer(serializers.ModelSerializer):
@@ -292,6 +292,63 @@ class InvoiceSerializer(serializers.ModelSerializer):
             valid = ('pending', 'paid', 'unpaid', 'partial')
             if normalized not in valid:
                 raise serializers.ValidationError(f'Must be one of: {valid}')
+            return normalized
+        return value
+
+
+class PatientRecallSerializer(serializers.ModelSerializer):
+    patient_name = serializers.CharField(source='patient.full_name', read_only=True)
+    treatment_name = serializers.CharField(source='treatment.name', read_only=True)
+    dentist_name = serializers.CharField(source='dentist.name', read_only=True)
+
+    class Meta:
+        model = PatientRecall
+        fields = [
+            'id', 'patient', 'patient_name', 'treatment', 'treatment_name',
+            'dentist', 'dentist_name', 'recall_type', 'day_of_month',
+            'interval_months', 'start_date', 'next_visit', 'status', 'created_at',
+        ]
+
+    def validate_recall_type(self, value):
+        if value:
+            normalized = value.lower()
+            valid = ('monthly', 'cleaning', 'checkup')
+            if normalized not in valid:
+                raise serializers.ValidationError(f'Must be one of: {valid}')
+            return normalized
+        return value
+
+    def validate_status(self, value):
+        if value:
+            normalized = value.lower()
+            valid = ('active', 'completed', 'cancelled')
+            if normalized not in valid:
+                raise serializers.ValidationError(f'Must be one of: {valid}')
+            return normalized
+        return value
+
+    def validate_day_of_month(self, value):
+        if value is not None and (value < 1 or value > 31):
+            raise serializers.ValidationError('Must be between 1 and 31.')
+        return value
+
+
+class RecallNotificationSerializer(serializers.ModelSerializer):
+    patient_name = serializers.CharField(source='patient.full_name', read_only=True)
+
+    class Meta:
+        model = RecallNotification
+        fields = [
+            'id', 'recall', 'patient', 'patient_name',
+            'reminder_date', 'method', 'sent', 'created_at',
+        ]
+
+    def validate_method(self, value):
+        if value:
+            normalized = value.lower()
+            valid = ('whatsapp', 'sms')
+            if normalized not in valid:
+                raise serializers.ValidationError('Must be one of: whatsapp, sms')
             return normalized
         return value
 

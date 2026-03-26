@@ -40,6 +40,19 @@ class AuditLog(models.Model):
         return f'{self.action} {self.resource or self.path} by {self.user} at {self.created_at}'
 
 
+class UserProfile(models.Model):
+    """Extended user profile with avatar."""
+    user = models.OneToOneField(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name='profile',
+    )
+    avatar = models.ImageField(upload_to='avatars/', blank=True, null=True)
+
+    def __str__(self):
+        return f'Profile of {self.user.username}'
+
+
 class Patient(models.Model):
     full_name = models.CharField(max_length=255)
     GENDER_CHOICES = [
@@ -169,3 +182,128 @@ class Payment(models.Model):
 
     def __str__(self):
         return f"{self.amount} - {self.method} ({self.payment_date})"
+
+
+class PatientRecall(models.Model):
+    """
+    Patient Recall / Follow-Up: schedule when patients must return.
+    Table: patient_recalls
+    """
+    RECALL_TYPE_CHOICES = [
+        ('monthly', 'Monthly'),
+        ('cleaning', 'Cleaning'),
+        ('checkup', 'Checkup'),
+    ]
+    STATUS_CHOICES = [
+        ('active', 'Active'),
+        ('completed', 'Completed'),
+        ('cancelled', 'Cancelled'),
+    ]
+
+    patient = models.ForeignKey(
+        Patient, on_delete=models.CASCADE, related_name='recalls',
+        help_text='Which patient must return',
+    )
+    treatment = models.ForeignKey(
+        Treatment, on_delete=models.CASCADE, related_name='recalls',
+        null=True, blank=True,
+        help_text='Treatment related to the recall',
+    )
+    dentist = models.ForeignKey(
+        Dentist, on_delete=models.CASCADE, related_name='recalls',
+        help_text='Responsible dentist',
+    )
+    recall_type = models.CharField(
+        max_length=20, choices=RECALL_TYPE_CHOICES,
+        help_text='Type of follow-up',
+    )
+    day_of_month = models.PositiveSmallIntegerField(
+        default=1,
+        help_text='Specific day patient must come (1-31)',
+    )
+    interval_months = models.PositiveIntegerField(
+        default=6,
+        help_text='How often patient returns (in months)',
+    )
+    start_date = models.DateField(
+        help_text='First visit date',
+    )
+    next_visit = models.DateField(
+        null=True, blank=True,
+        help_text='Automatically calculated next visit',
+    )
+    status = models.CharField(
+        max_length=20, choices=STATUS_CHOICES, default='active',
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['-next_visit', '-created_at']
+        verbose_name = 'Patient Recall'
+        verbose_name_plural = 'Patient Recalls'
+
+    def __str__(self):
+        return f'{self.patient} - {self.recall_type} ({self.next_visit or self.start_date})'
+
+    def calculate_next_visit(self, from_date=None):
+        """Calculate next visit date from start_date + interval_months, using day_of_month."""
+        from datetime import date
+        from calendar import monthrange
+        base = from_date or self.start_date
+        if isinstance(base, str):
+            from datetime import datetime
+            base = datetime.strptime(base, '%Y-%m-%d').date()
+        year, month = base.year, base.month
+        month += self.interval_months
+        while month > 12:
+            month -= 12
+            year += 1
+        day = min(self.day_of_month, monthrange(year, month)[1])
+        return date(year, month, day)
+
+    def save(self, *args, **kwargs):
+        if self.next_visit is None and self.start_date and self.status == 'active':
+            try:
+                self.next_visit = self.calculate_next_visit()
+            except Exception:
+                pass
+        super().save(*args, **kwargs)
+
+
+class RecallNotification(models.Model):
+    """
+    Recall Notifications: track reminder messages sent for patient recalls.
+    Table: recall_notifications
+    """
+    METHOD_CHOICES = [
+        ('whatsapp', 'WhatsApp'),
+        ('sms', 'SMS'),
+    ]
+
+    recall = models.ForeignKey(
+        PatientRecall, on_delete=models.CASCADE, related_name='notifications',
+        help_text='Related recall',
+    )
+    patient = models.ForeignKey(
+        Patient, on_delete=models.CASCADE, related_name='recall_notifications',
+        help_text='Patient to notify',
+    )
+    reminder_date = models.DateField(
+        help_text='Date the reminder is scheduled for',
+    )
+    method = models.CharField(
+        max_length=20, choices=METHOD_CHOICES,
+    )
+    sent = models.BooleanField(
+        default=False,
+        help_text='Whether the notification was sent',
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['-reminder_date', '-created_at']
+        verbose_name = 'Recall Notification'
+        verbose_name_plural = 'Recall Notifications'
+
+    def __str__(self):
+        return f'{self.patient} - {self.method} ({self.reminder_date}) - {"Sent" if self.sent else "Pending"}'

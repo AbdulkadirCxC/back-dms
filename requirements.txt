@@ -4,3 +4,4 @@ django-cors-headers>=4.3
 django-filter>=24.0
 djangorestframework-simplejwt>=5.3
 python-decouple>=3.8
+twilio>=8.0

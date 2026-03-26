@@ -103,6 +103,22 @@ REST_FRAMEWORK = {
 # CORS - Allow all in development; restrict in production
 CORS_ALLOW_ALL_ORIGINS = True
 
+# Recall notifications (Twilio)
+# Add to .env: TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN
+# For SMS: TWILIO_PHONE (e.g. +1234567890)
+# For WhatsApp: TWILIO_WHATSAPP_FROM (e.g. whatsapp:+14155238886)
+try:
+    from decouple import config
+    TWILIO_ACCOUNT_SID = config('TWILIO_ACCOUNT_SID', default='')
+    TWILIO_AUTH_TOKEN = config('TWILIO_AUTH_TOKEN', default='')
+    TWILIO_PHONE = config('TWILIO_PHONE', default='')
+    TWILIO_WHATSAPP_FROM = config('TWILIO_WHATSAPP_FROM', default='')
+except ImportError:
+    TWILIO_ACCOUNT_SID = ''
+    TWILIO_AUTH_TOKEN = ''
+    TWILIO_PHONE = ''
+    TWILIO_WHATSAPP_FROM = ''
+
 # JWT Token expiration
 SIMPLE_JWT = {
     'ACCESS_TOKEN_LIFETIME': timedelta(hours=24),   # Access token valid for 24 hours

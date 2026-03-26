@@ -4,7 +4,7 @@ from rest_framework import status, viewsets
 from rest_framework.decorators import action
 from rest_framework.response import Response
 
-from .models import Patient, Dentist, Appointment, Treatment, PatientTreatment, Invoice, Payment
+from .models import Patient, Dentist, Appointment, Treatment, PatientTreatment, Invoice, Payment, PatientRecall, RecallNotification
 from .serializers import (
     PatientSerializer,
     DentistSerializer,
@@ -15,6 +15,8 @@ from .serializers import (
     PatientTreatmentBatchSerializer,
     InvoiceSerializer,
     PaymentSerializer,
+    PatientRecallSerializer,
+    RecallNotificationSerializer,
 )
 
 
@@ -190,6 +192,126 @@ class InvoiceViewSet(viewsets.ModelViewSet):
             'doctor': pt.dentist.name if pt and pt.dentist_id else None,
         }
         return Response(data)
+
+
+class PatientRecallViewSet(viewsets.ModelViewSet):
+    """Patient Recall / Follow-Up API."""
+    queryset = PatientRecall.objects.select_related('patient', 'treatment', 'dentist').all()
+    serializer_class = PatientRecallSerializer
+    filterset_fields = ['patient', 'dentist', 'treatment', 'recall_type', 'status']
+
+
+class RecallNotificationViewSet(viewsets.ModelViewSet):
+    """
+    Recall Notifications API.
+    Simple workflow: GET due-today -> Staff clicks WhatsApp link -> Sends manually -> PATCH mark-sent
+    """
+    queryset = RecallNotification.objects.select_related('recall', 'patient', 'recall__dentist').all()
+    serializer_class = RecallNotificationSerializer
+    filterset_fields = ['recall', 'patient', 'method', 'sent']
+
+    @action(detail=False, methods=['post'], url_path='generate')
+    def generate(self, request):
+        """
+        Create RecallNotifications from active PatientRecalls (reminder 2 days before next_visit).
+        POST /api/recall-notifications/generate/
+        Call once to backfill existing recalls.
+        """
+        from datetime import timedelta
+        created = 0
+        for recall in PatientRecall.objects.filter(status='active', next_visit__isnull=False).select_related('patient'):
+            reminder_date = recall.next_visit - timedelta(days=2)
+            _, is_new = RecallNotification.objects.get_or_create(
+                recall=recall,
+                patient=recall.patient,
+                reminder_date=reminder_date,
+                defaults={'method': 'whatsapp', 'sent': False},
+            )
+            if is_new:
+                created += 1
+        return Response({'detail': f'Created {created} notifications'})
+
+    @action(detail=False, methods=['get'], url_path='due-today')
+    def due_today(self, request):
+        """
+        Due reminders: reminder_date <= today and not sent (or exact date if ?date= given).
+        GET /api/recall-notifications/due-today/
+        GET /api/recall-notifications/due-today/?date=2026-04-08
+        """
+        from datetime import datetime
+        from django.utils import timezone
+        from .services.notification_sender import build_recall_message, get_whatsapp_link, get_sms_link
+
+        date_param = request.query_params.get('date')
+        if date_param:
+            try:
+                target_date = datetime.strptime(date_param, '%Y-%m-%d').date()
+                qs = RecallNotification.objects.filter(reminder_date=target_date)
+            except ValueError:
+                target_date = timezone.now().date()
+                qs = RecallNotification.objects.filter(reminder_date__lte=target_date, sent=False)
+        else:
+            target_date = timezone.now().date()
+            qs = RecallNotification.objects.filter(reminder_date__lte=target_date, sent=False)
+
+        qs = qs.select_related('recall', 'patient', 'recall__dentist').order_by('reminder_date', 'recall__next_visit')
+
+        result = []
+        for n in qs:
+            recall = n.recall
+            visit_date = recall.next_visit or recall.start_date
+            msg = build_recall_message(n)
+            result.append({
+                'id': n.id,
+                'patient': n.patient.full_name,
+                'patient_id': n.patient_id,
+                'visit_date': visit_date.isoformat() if visit_date else None,
+                'reminder_date': n.reminder_date.isoformat(),
+                'method': n.method,
+                'sent': n.sent,
+                'message': msg,
+                'whatsapp_link': get_whatsapp_link(n) if n.patient.phone else None,
+                'sms_link': get_sms_link(n) if n.patient.phone else None,
+            })
+        return Response(result)
+
+    @action(detail=True, methods=['post', 'patch'], url_path='mark-sent')
+    def mark_sent(self, request, pk=None):
+        """
+        Mark as sent after staff manually sends via WhatsApp/SMS.
+        POST /api/recall-notifications/{id}/mark-sent/
+        """
+        notification = self.get_object()
+        notification.sent = True
+        notification.save()
+        return Response({'detail': 'Marked as sent', 'sent': True})
+
+    @action(detail=True, methods=['post'], url_path='send')
+    def send_notification(self, request, pk=None):
+        """
+        Send via Twilio API (optional). For simple workflow, use mark-sent instead.
+        POST /api/recall-notifications/{id}/send/
+        """
+        notification = self.get_object()
+        if notification.sent:
+            return Response(
+                {'detail': 'Notification already sent', 'sent': True},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        from .services.notification_sender import send_recall_notification
+        success, error = send_recall_notification(notification)
+        if success:
+            notification.sent = True
+            notification.save()
+            return Response({
+                'detail': 'Message sent successfully',
+                'sent': True,
+                'method': notification.method,
+            })
+        return Response(
+            {'detail': error or 'Failed to send', 'sent': False},
+            status=status.HTTP_503_SERVICE_UNAVAILABLE,
+        )
 
 
 class PaymentViewSet(viewsets.ModelViewSet):

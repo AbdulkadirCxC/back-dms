@@ -8,6 +8,8 @@ from .views import (
     PatientTreatmentViewSet,
     InvoiceViewSet,
     PaymentViewSet,
+    PatientRecallViewSet,
+    RecallNotificationViewSet,
 )
 from .views_roles import RoleViewSet, UserViewSet, permissions_list, user_roles
 from .views_reports import (
@@ -31,6 +33,8 @@ router.register(r'treatments', TreatmentViewSet, basename='treatment')
 router.register(r'patient-treatments', PatientTreatmentViewSet, basename='patient-treatment')
 router.register(r'invoices', InvoiceViewSet, basename='invoice')
 router.register(r'payments', PaymentViewSet, basename='payment')
+router.register(r'patient-recalls', PatientRecallViewSet, basename='patient-recall')
+router.register(r'recall-notifications', RecallNotificationViewSet, basename='recall-notification')
 router.register(r'roles', RoleViewSet, basename='role')
 router.register(r'users', UserViewSet, basename='user')
 

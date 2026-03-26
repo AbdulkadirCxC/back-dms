@@ -1,5 +1,5 @@
 from django.contrib import admin
-from .models import Patient, Dentist, Appointment, Treatment, PatientTreatment, Invoice, Payment, AuditLog
+from .models import Patient, Dentist, Appointment, Treatment, PatientTreatment, Invoice, Payment, AuditLog, PatientRecall, RecallNotification
 
 
 @admin.register(AuditLog)
@@ -51,3 +51,19 @@ class InvoiceAdmin(admin.ModelAdmin):
 class PaymentAdmin(admin.ModelAdmin):
     list_display = ['invoice', 'amount', 'method', 'payment_date']
     list_filter = ['method']
+
+
+@admin.register(PatientRecall)
+class PatientRecallAdmin(admin.ModelAdmin):
+    list_display = ['patient', 'dentist', 'recall_type', 'start_date', 'next_visit', 'status']
+    list_filter = ['recall_type', 'status', 'dentist']
+    date_hierarchy = 'next_visit'
+    search_fields = ['patient__full_name']
+
+
+@admin.register(RecallNotification)
+class RecallNotificationAdmin(admin.ModelAdmin):
+    list_display = ['recall', 'patient', 'reminder_date', 'method', 'sent', 'created_at']
+    list_filter = ['method', 'sent']
+    date_hierarchy = 'reminder_date'
+    search_fields = ['patient__full_name']
